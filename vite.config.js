@@ -79,7 +79,7 @@ function parseWebVttOrSrt(text) {
   return list;
 }
 
-// Invidious API metadata fetcher fallback
+// Invidious API metadata fetcher fallback (high-speed parallel racing)
 async function fetchInvidiousMetadata(videoId) {
   try {
     console.log("Fetching Invidious public instances list...");
@@ -96,37 +96,43 @@ async function fetchInvidiousMetadata(videoId) {
       throw new Error("No active Invidious instances found in directory");
     }
     
-    // Always prioritize the ones known to work well or try a shuffled set
-    const instancesToTry = [...new Set([
+    // Select top candidates plus active ones from directory
+    const candidates = [...new Set([
       'https://inv.thepixora.com',
       'https://invidious.nerdvpn.de',
       'https://yewtu.be',
-      ...healthyInstances
+      ...healthyInstances.slice(0, 12)
     ])];
     
-    for (const baseUri of instancesToTry) {
+    console.log(`Running parallel race across ${candidates.length} Invidious instances...`);
+    
+    // Create parallel fetch promises
+    const fetchPromises = candidates.map(async (baseUri) => {
       const url = `${baseUri}/api/v1/videos/${videoId}`;
-      console.log(`Invidious Fallback: Querying ${url}...`);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4500); // 4.5s timeout per request
+      
       try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 4000); // 4s timeout per instance
-        
         const res = await fetch(url, { signal: controller.signal });
         clearTimeout(timeoutId);
-        
         if (res.status === 200) {
           const videoData = await res.json();
           if (videoData && videoData.title) {
-            console.log(`Invidious Fallback: Success from ${baseUri}!`);
+            console.log(`Fallback Race Winner: ${baseUri} responded first!`);
             return { videoData, baseUri };
           }
         }
-      } catch (err) {
-        console.warn(`Invidious Fallback: Failed for ${baseUri}:`, err.message);
+      } catch (e) {
+        // Fail silently so other instances can win
       }
-    }
+      throw new Error(`Failed to fetch from ${baseUri}`);
+    });
+    
+    // Promise.any resolves as soon as one fetch succeeds
+    const winner = await Promise.any(fetchPromises);
+    return winner;
   } catch (err) {
-    console.error("fetchInvidiousMetadata exception:", err.message);
+    console.error("fetchInvidiousMetadata parallel race failed:", err.message);
   }
   return null;
 }
