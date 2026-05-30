@@ -82,15 +82,26 @@ function mapInvidiousResponse(videoData, baseUri) {
     return { width: parseInt(parts[0]), height: parseInt(parts[1]) };
   };
   
+  const rewriteToProxy = (rawUrl) => {
+    if (rawUrl && rawUrl.includes('googlevideo.com/videoplayback')) {
+      try {
+        const gvUrl = new URL(rawUrl);
+        return `${baseUri}/videoplayback${gvUrl.search}`;
+      } catch (e) {}
+    }
+    return rawUrl;
+  };
+
   if (videoData.formatStreams) {
     for (const f of videoData.formatStreams) {
       const { width, height } = parseSize(f.size);
-      const proxiedUrl = `/api/youtube/stream?url=${encodeURIComponent(f.url)}`;
+      const rewrittenUrl = rewriteToProxy(f.url);
+      const proxiedUrl = `/api/youtube/stream?url=${encodeURIComponent(rewrittenUrl)}`;
       formats.push({
         id: f.itag,
         ext: f.container || 'mp4',
         url: proxiedUrl,
-        rawUrl: f.url,
+        rawUrl: rewrittenUrl,
         resolution: f.resolution || f.qualityLabel || (height ? `${height}p` : undefined),
         width: width,
         height: height,
@@ -117,12 +128,13 @@ function mapInvidiousResponse(videoData, baseUri) {
         }
       }
       
-      const proxiedUrl = `/api/youtube/stream?url=${encodeURIComponent(f.url)}`;
+      const rewrittenUrl = rewriteToProxy(f.url);
+      const proxiedUrl = `/api/youtube/stream?url=${encodeURIComponent(rewrittenUrl)}`;
       formats.push({
         id: f.itag,
         ext: f.container || 'mp4',
         url: proxiedUrl,
-        rawUrl: f.url,
+        rawUrl: rewrittenUrl,
         resolution: f.resolution || f.qualityLabel || (height ? `${height}p` : undefined),
         width: width,
         height: height,

@@ -114,15 +114,53 @@ export default function Export() {
 
       updateQueueItem(exportId, { status: 'processing', progress: 5 });
 
-      // Wait for metadata to load
-      await new Promise((resolve) => {
-        video.onloadedmetadata = () => resolve();
+      // Wait for metadata to load with 15s timeout
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          cleanup();
+          reject(new Error("Timeout loading video metadata. The stream may be slow or blocked."));
+        }, 15000);
+
+        function cleanup() {
+          clearTimeout(timeout);
+          video.onloadedmetadata = null;
+          video.onerror = null;
+        }
+
+        video.onloadedmetadata = () => {
+          cleanup();
+          resolve();
+        };
+
+        video.onerror = (e) => {
+          cleanup();
+          reject(new Error("Failed to load video stream in browser. Check network or try another video."));
+        };
       });
 
-      // Seek to clip start
+      // Seek to clip start with 10s timeout
       video.currentTime = activeClip.start;
-      await new Promise((resolve) => {
-        video.onseeked = () => resolve();
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          cleanup();
+          reject(new Error("Timeout seeking video stream to start point."));
+        }, 10000);
+
+        function cleanup() {
+          clearTimeout(timeout);
+          video.onseeked = null;
+          video.onerror = null;
+        }
+
+        video.onseeked = () => {
+          cleanup();
+          resolve();
+        };
+
+        video.onerror = (e) => {
+          cleanup();
+          reject(new Error("Failed to seek video stream."));
+        };
       });
 
       updateQueueItem(exportId, { progress: 15 });
@@ -193,8 +231,14 @@ export default function Export() {
         const videoBlob = new Blob(chunks, { type: `video/${format}` });
         const outputBlobUrl = URL.createObjectURL(videoBlob);
         
-        // Generate thumbnail frame from canvas
-        const thumbnailDataUrl = canvas.toDataURL('image/jpeg', 0.6);
+        // Generate thumbnail frame from canvas with safe fallback
+        let thumbnailDataUrl = '';
+        try {
+          thumbnailDataUrl = canvas.toDataURL('image/jpeg', 0.6);
+        } catch (thumbErr) {
+          console.warn("Failed to generate canvas thumbnail (cross-origin taint?):", thumbErr);
+          thumbnailDataUrl = activeClip.thumbnail || '';
+        }
 
         // Save to IndexedDB
         await saveExport({
