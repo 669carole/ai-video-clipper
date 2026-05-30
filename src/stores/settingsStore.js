@@ -13,6 +13,7 @@ export const useSettingsStore = create(
       watermarkText: 'AI Clipper',
       watermarkEnabled: false,
       useLocalAIOnly: true, // option to force HuggingFace Transformers.js
+      youtubeCookies: '',
       setCloudflareApiToken: (token) => set({ cloudflareApiToken: token }),
       setCloudflareAccountId: (id) => set({ cloudflareAccountId: id }),
       setConcurrentExports: (num) => set({ concurrentExports: num }),
@@ -22,6 +23,7 @@ export const useSettingsStore = create(
       setWatermarkText: (text) => set({ watermarkText: text }),
       setWatermarkEnabled: (enabled) => set({ watermarkEnabled: enabled }),
       setUseLocalAIOnly: (val) => set({ useLocalAIOnly: val }),
+      setYoutubeCookies: (val) => set({ youtubeCookies: val }),
     }),
     {
       name: 'ai-clipper-settings',

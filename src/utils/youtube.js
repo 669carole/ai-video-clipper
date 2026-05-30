@@ -1,3 +1,5 @@
+import { useSettingsStore } from '../stores/settingsStore';
+
 // Module-level AbortController for cancelling in-flight fetchVideoDetails calls
 let _fetchVideoDetailsController = null;
 
@@ -248,7 +250,20 @@ export async function fetchVideoDetails(url, externalSignal) {
 
   try {
     // 1. Try backend server extraction (yt-dlp or server-side fallback)
-    const response = await fetch(`/api/youtube/info?url=${encodeURIComponent(url)}`, { signal });
+    const cookies = useSettingsStore.getState()?.youtubeCookies || '';
+    const fetchOptions = {
+      signal,
+      method: cookies ? 'POST' : 'GET',
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    };
+    if (cookies) {
+      fetchOptions.body = JSON.stringify({ url, cookies });
+    }
+    const fetchUrl = cookies ? '/api/youtube/info' : `/api/youtube/info?url=${encodeURIComponent(url)}`;
+    
+    const response = await fetch(fetchUrl, fetchOptions);
     if (response.ok) {
       return await response.json();
     }

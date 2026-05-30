@@ -20,6 +20,7 @@ export default function Settings() {
     watermarkText,
     watermarkEnabled,
     useLocalAIOnly,
+    youtubeCookies,
     setCloudflareApiToken,
     setCloudflareAccountId,
     setConcurrentExports,
@@ -28,7 +29,8 @@ export default function Settings() {
     setExportFps,
     setWatermarkText,
     setWatermarkEnabled,
-    setUseLocalAIOnly
+    setUseLocalAIOnly,
+    setYoutubeCookies
   } = useSettingsStore();
 
   const [storageStats, setStorageStats] = useState({ used: '0', quota: '0', percentage: '0' });
@@ -153,6 +155,35 @@ export default function Settings() {
                 </div>
               </div>
             )}
+          </div>
+
+          {/* Section 1.5: YouTube Authentication Cookies */}
+          <div className="glass-panel p-6 rounded-3xl shadow-xl space-y-4">
+            <h3 className="text-sm font-bold text-white flex items-center gap-1.5 border-b border-white/5 pb-2.5">
+              <Shield className="w-4 h-4 text-brand-purple" /> YouTube Authentication (Cloud Hosting Bypass)
+            </h3>
+
+            <div className="space-y-2">
+              <span className="text-xs font-bold text-white block">YouTube Cookies (.txt / Netscape format)</span>
+              <span className="text-[10px] text-zinc-500 block leading-relaxed">
+                If your hosted application (e.g., on Hugging Face Spaces / Render) gets blocked by YouTube with "Sign in to confirm you're not a bot", export your YouTube session cookies in Netscape format (e.g., using "Get cookies.txt LOCALLY" extension in Chrome/Firefox) and paste them here.
+              </span>
+              <textarea
+                value={youtubeCookies}
+                onChange={(e) => setYoutubeCookies(e.target.value)}
+                placeholder="# Netscape HTTP Cookie File&#10;.youtube.com&#10;..."
+                rows={5}
+                className="w-full px-3 py-2 bg-black/40 border border-white/10 rounded-xl text-xs outline-none text-white focus:border-brand-purple font-mono"
+              />
+              {youtubeCookies && (
+                <button
+                  onClick={() => { setYoutubeCookies(''); toast.success("Cookies cleared!"); }}
+                  className="text-[10px] text-red-400 hover:text-red-300 font-bold underline block cursor-pointer"
+                >
+                  Clear Cookies
+                </button>
+              )}
+            </div>
           </div>
 
           {/* Section 2: Default Export Parameters */}

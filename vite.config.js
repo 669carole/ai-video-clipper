@@ -5,7 +5,7 @@ import { execFile } from 'child_process';
 import { request as requestHttps } from 'https';
 import { request as requestHttp } from 'http';
 import { URL } from 'url';
-import { existsSync } from 'fs';
+import { existsSync, writeFileSync, unlinkSync } from 'fs';
 
 // Define binary paths with local fallbacks
 const localYtDlp = '/home/gc/node-v22/bin/yt-dlp';
@@ -233,21 +233,56 @@ function setupYoutubeProxy(middlewares) {
       
       // 1. Video Info Endpoint
       if (urlObj.pathname === '/api/youtube/info') {
-        const videoUrl = urlObj.searchParams.get('url');
-        if (!videoUrl) {
-          res.statusCode = 400;
-          res.setHeader('Content-Type', 'application/json');
-          res.end(JSON.stringify({ error: 'Missing url parameter' }));
-          return;
-        }
-        
-        execFile(ytDlpPath, [
-          '--js-runtimes', `node:${nodePath}`,
-          '-j',
-          videoUrl
-        ], { maxBuffer: 15 * 1024 * 1024 }, async (err, stdout, stderr) => {
-          if (err) {
-            console.warn("yt-dlp failed, attempting Invidious fallback. Error:", err.message);
+        let body = '';
+        req.on('data', (chunk) => {
+          body += chunk.toString();
+        });
+        req.on('end', async () => {
+          let videoUrl = urlObj.searchParams.get('url');
+          let cookies = '';
+          if (body) {
+            try {
+              const parsed = JSON.parse(body);
+              if (parsed.url) videoUrl = parsed.url;
+              if (parsed.cookies) cookies = parsed.cookies;
+            } catch (e) {}
+          }
+
+          if (!videoUrl) {
+            res.statusCode = 400;
+            res.setHeader('Content-Type', 'application/json');
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            res.end(JSON.stringify({ error: 'Missing url parameter' }));
+            return;
+          }
+
+          let tempCookieFile = null;
+          const ytDlpArgs = [
+            '--js-runtimes', `node:${nodePath}`,
+            '-j',
+            videoUrl
+          ];
+
+          if (cookies && cookies.trim().length > 0) {
+            try {
+              tempCookieFile = `/tmp/cookies-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`;
+              writeFileSync(tempCookieFile, cookies.trim());
+              ytDlpArgs.push('--cookies', tempCookieFile);
+            } catch (e) {
+              console.error("Failed to write temporary cookies file:", e);
+            }
+          }
+
+          execFile(ytDlpPath, ytDlpArgs, { maxBuffer: 15 * 1024 * 1024 }, async (err, stdout, stderr) => {
+            // Clean up cookies file if created
+            if (tempCookieFile && existsSync(tempCookieFile)) {
+              try {
+                unlinkSync(tempCookieFile);
+              } catch (e) {}
+            }
+
+            if (err) {
+              console.warn("yt-dlp failed, attempting Invidious fallback. Error:", err.message);
             const videoId = extractVideoId(videoUrl);
             if (!videoId) {
               res.statusCode = 500;
@@ -474,8 +509,9 @@ function setupYoutubeProxy(middlewares) {
             res.end(JSON.stringify({ error: 'Failed to parse metadata', details: parseErr.message }));
           }
         });
-        return;
-      }
+      });
+      return;
+    }
       
       // 2. Video Stream Proxying Endpoint
       if (urlObj.pathname === '/api/youtube/stream') {
