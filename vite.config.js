@@ -14,12 +14,30 @@ const localNode = '/home/gc/node-v22/bin/node';
 const ytDlpPath = existsSync(localYtDlp) ? localYtDlp : 'yt-dlp';
 const nodePath = existsSync(localNode) ? localNode : 'node';
 
-// Helper to extract YouTube video ID from URL
+// Helper to extract YouTube video ID from URL supporting Shorts, Live, Music, Share, Embed, and raw IDs
 function extractVideoId(url) {
   if (!url) return null;
-  const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
-  const match = url.match(regExp);
-  return (match && match[2].length === 11) ? match[2] : null;
+  const cleanUrl = url.trim();
+  
+  if (/^[a-zA-Z0-9_-]{11}$/.test(cleanUrl)) {
+    return cleanUrl;
+  }
+  
+  try {
+    const regExp = /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?|shorts|live)\/|presentation\/|watch\?.*v=|embed\/|watch\?.*\&v=)|youtu\.be\/|music\.youtube\.com\/watch\?.*v=)([a-zA-Z0-9_-]{11})/;
+    const match = cleanUrl.match(regExp);
+    if (match && match[1] && match[1].length === 11) {
+      return match[1];
+    }
+  } catch (e) {}
+  
+  const backupRegex = /(?:\/|=)([a-zA-Z0-9_-]{11})(?:[?&]|$)/;
+  const backupMatch = cleanUrl.match(backupRegex);
+  if (backupMatch && backupMatch[1] && backupMatch[1].length === 11) {
+    return backupMatch[1];
+  }
+  
+  return null;
 }
 
 // Simple WebVTT/SRT subtitle parser
@@ -79,60 +97,65 @@ function parseWebVttOrSrt(text) {
   return list;
 }
 
-// Invidious API metadata fetcher fallback (high-speed parallel racing)
+// Invidious API metadata fetcher fallback (high-speed parallel racing over stable instances)
 async function fetchInvidiousMetadata(videoId) {
-  try {
-    console.log("Fetching Invidious public instances list...");
-    const instancesRes = await fetch('https://api.invidious.io/instances.json');
-    if (!instancesRes.ok) throw new Error("Failed to load Invidious instances directory");
-    const instancesData = await instancesRes.json();
+  // A pool of stable public Invidious instances to query immediately in parallel.
+  // This bypasses api.invidious.io which may be blocked by the cloud egress firewall.
+  const candidates = [
+    'https://inv.thepixora.com',
+    'https://invidious.nerdvpn.de',
+    'https://yewtu.be',
+    'https://invidious.f5.si',
+    'https://yt.chocolatemoo53.com',
+    'https://inv.nadeko.net',
+    'https://invidious.tiekoetter.com',
+    'https://invidious.flokinet.to',
+    'https://invidious.privacydev.net',
+    'https://invidious.projectsegfau.lt',
+    'https://invidious.lunar.icu',
+    'https://invidious.slipfox.xyz'
+  ];
+  
+  console.log(`Running parallel race across ${candidates.length} Invidious instances for video: ${videoId}`);
+  
+  // Create parallel fetch promises
+  const fetchPromises = candidates.map(async (baseUri) => {
+    const url = `${baseUri}/api/v1/videos/${videoId}`;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 4500); // 4.5s timeout per request
     
-    const healthyInstances = instancesData
-      .map(item => item[1])
-      .filter(inst => inst.type === 'https' && inst.monitor && inst.monitor.last_status === 200)
-      .map(inst => inst.uri);
+    try {
+      const res = await fetch(url, { 
+        signal: controller.signal,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
+        }
+      });
+      clearTimeout(timeoutId);
       
-    if (healthyInstances.length === 0) {
-      throw new Error("No active Invidious instances found in directory");
-    }
-    
-    // Select top candidates plus active ones from directory
-    const candidates = [...new Set([
-      'https://inv.thepixora.com',
-      'https://invidious.nerdvpn.de',
-      'https://yewtu.be',
-      ...healthyInstances.slice(0, 12)
-    ])];
-    
-    console.log(`Running parallel race across ${candidates.length} Invidious instances...`);
-    
-    // Create parallel fetch promises
-    const fetchPromises = candidates.map(async (baseUri) => {
-      const url = `${baseUri}/api/v1/videos/${videoId}`;
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 4500); // 4.5s timeout per request
-      
-      try {
-        const res = await fetch(url, { signal: controller.signal });
-        clearTimeout(timeoutId);
-        if (res.status === 200) {
+      if (res.status === 200) {
+        try {
           const videoData = await res.json();
           if (videoData && videoData.title) {
             console.log(`Fallback Race Winner: ${baseUri} responded first!`);
             return { videoData, baseUri };
           }
+        } catch (jsonErr) {
+          // not json
         }
-      } catch (e) {
-        // Fail silently so other instances can win
       }
-      throw new Error(`Failed to fetch from ${baseUri}`);
-    });
-    
+    } catch (e) {
+      // Fail silently so other instances can win
+    }
+    throw new Error(`Failed to fetch from ${baseUri}`);
+  });
+  
+  try {
     // Promise.any resolves as soon as one fetch succeeds
     const winner = await Promise.any(fetchPromises);
     return winner;
   } catch (err) {
-    console.error("fetchInvidiousMetadata parallel race failed:", err.message);
+    console.error("fetchInvidiousMetadata parallel race failed for all candidates:", err.message);
   }
   return null;
 }
