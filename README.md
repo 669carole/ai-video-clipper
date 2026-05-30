@@ -1,3 +1,13 @@
+---
+title: Ai Video Clipper
+emoji: 🚀
+colorFrom: gray
+colorTo: gray
+sdk: docker
+app_port: 5173
+pinned: false
+---
+
 # React + Vite
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
