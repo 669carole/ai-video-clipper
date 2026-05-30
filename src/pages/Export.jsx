@@ -85,8 +85,12 @@ export default function Export() {
     toast.info("Clip added to render queue! Initializing render canvas...");
 
     try {
-      // Get preview streams
-      const videoStream = formats.find(f => f.vcodec !== 'none' && f.acodec !== 'none') || formats[0];
+      // Prioritize lightweight progressive stream (format 18, 360p/480p combined) to avoid buffering lag during export
+      const videoStream = formats.find(f => f.id === '18') ||
+                          formats.find(f => f.resolution === '360p' && f.vcodec !== 'none' && f.acodec !== 'none') ||
+                          formats.find(f => f.resolution === '480p' && f.vcodec !== 'none' && f.acodec !== 'none') ||
+                          formats.find(f => f.vcodec !== 'none' && f.acodec !== 'none') || 
+                          formats[0];
       if (!videoStream) throw new Error("No video streaming formats resolved");
 
       // Setup rendering elements

@@ -384,8 +384,11 @@ export default function Editor() {
     );
   }
 
-  // Get preview media stream. We prefer combined (video+audio) for editing preview to keep audio in sync.
-  const previewStream = formats.find(f => f.vcodec !== 'none' && f.acodec !== 'none') || formats[0];
+  // Get preview media stream. We prefer format 18 (360p progressive combined format) for extremely fast, buffer-free editing and scrubbing.
+  const previewStream = formats.find(f => f.id === '18') ||
+                        formats.find(f => f.resolution === '360p' && f.vcodec !== 'none' && f.acodec !== 'none') ||
+                        formats.find(f => f.vcodec !== 'none' && f.acodec !== 'none') || 
+                        formats[0];
 
   return (
     <div className="space-y-6">
