@@ -1,12 +1,21 @@
 export async function generateWaveform(audioUrl, duration, numPeaks = 150) {
   try {
-    const response = await fetch(audioUrl);
-    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+    // Limit download to first 5MB to avoid downloading entire audio files for waveform display
+    const response = await fetch(audioUrl, {
+      headers: { 'Range': 'bytes=0-5242880' }
+    });
+    if (!response.ok && response.status !== 206) throw new Error(`HTTP error! status: ${response.status}`);
     const arrayBuffer = await response.arrayBuffer();
     
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     const audioCtx = new AudioContextClass();
-    const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+    let audioBuffer;
+    try {
+      audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+    } finally {
+      // Always close AudioContext to free system resources (browsers limit to ~6 concurrent)
+      audioCtx.close().catch(() => {});
+    }
     
     const channelData = audioBuffer.getChannelData(0);
     const step = Math.floor(channelData.length / numPeaks);
@@ -15,7 +24,7 @@ export async function generateWaveform(audioUrl, duration, numPeaks = 150) {
     for (let i = 0; i < numPeaks; i++) {
       let max = 0;
       const start = i * step;
-      const end = start + step;
+      const end = Math.min(start + step, channelData.length);
       for (let j = start; j < end; j++) {
         const val = Math.abs(channelData[j]);
         if (val > max) max = val;

@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import { toast } from 'sonner';
 import { 
   Download, Share2, Film, RefreshCw, Trash2, Sliders, CheckCircle, 
@@ -32,9 +32,8 @@ export default function Export() {
   const [format, setFormat] = useState('webm');
   const [fps, setFps] = useState(30);
 
-  // Hidden player element for rendering
-  const renderVideoRef = useRef(null);
-  const renderAudioRef = useRef(null);
+  // Map of exportId → { interval, recorder, audioCtx, video, bgAudio } for active renders
+  const activeRendersRef = useRef(new Map());
 
   // Curated filters for canvas render
   const filterPresets = [
@@ -56,6 +55,24 @@ export default function Export() {
       }
     }
   }, [clipId, clips]);
+
+  // Cleanup all active renders on component unmount
+  useEffect(() => {
+    return () => {
+      activeRendersRef.current.forEach((entry, id) => {
+        if (entry.interval) clearInterval(entry.interval);
+        if (entry.recorder && entry.recorder.state !== 'inactive') {
+          try { entry.recorder.stop(); } catch (_) {}
+        }
+        if (entry.audioCtx && entry.audioCtx.state !== 'closed') {
+          try { entry.audioCtx.close(); } catch (_) {}
+        }
+        if (entry.video) entry.video.pause();
+        if (entry.bgAudio) entry.bgAudio.pause();
+      });
+      activeRendersRef.current.clear();
+    };
+  }, []);
 
   async function loadGallery() {
     try {
@@ -91,30 +108,34 @@ export default function Export() {
                           formats.find(f => f.resolution === '480p' && f.vcodec !== 'none' && f.acodec !== 'none') ||
                           formats.find(f => f.vcodec !== 'none' && f.acodec !== 'none') || 
                           formats[0];
-      if (!videoStream) throw new Error("No video streaming formats resolved");
+      if (!videoStream || !videoStream.url) {
+        toast.error("No suitable video format found. Try a different video or check available formats.");
+        removeFromQueue(exportId);
+        return;
+      }
 
-      // Setup rendering elements
-      const video = renderVideoRef.current;
-      video.src = videoStream.url;
+      // Create fresh elements to avoid 'HTMLMediaElement already connected' on re-export
+      const video = document.createElement('video');
       video.crossOrigin = 'anonymous';
       video.muted = true; // render muted to avoid speakers blast
 
       // Setup background music if active
       let bgAudio = null;
       if (activeClip.editingState.bgMusicUrl) {
-        bgAudio = renderAudioRef.current;
+        bgAudio = new Audio();
+        bgAudio.crossOrigin = 'anonymous';
+        bgAudio.volume = activeClip.editingState.bgMusicVolume;
+        bgAudio.loop = true;
         const proxiedMusicUrl = activeClip.editingState.bgMusicUrl.startsWith('http')
           ? `/api/proxy?url=${encodeURIComponent(activeClip.editingState.bgMusicUrl)}`
           : activeClip.editingState.bgMusicUrl;
         bgAudio.src = proxiedMusicUrl;
-        bgAudio.crossOrigin = 'anonymous';
-        bgAudio.volume = activeClip.editingState.bgMusicVolume;
-        bgAudio.loop = true;
       }
 
       updateQueueItem(exportId, { status: 'processing', progress: 5 });
 
       // Wait for metadata to load with 15s timeout
+      // Set handlers BEFORE src to avoid race condition with cached videos
       await new Promise((resolve, reject) => {
         const timeout = setTimeout(() => {
           cleanup();
@@ -136,6 +157,9 @@ export default function Export() {
           cleanup();
           reject(new Error("Failed to load video stream in browser. Check network or try another video."));
         };
+
+        // Set src LAST so handlers are guaranteed to be in place
+        video.src = videoStream.url;
       });
 
       // Seek to clip start with 10s timeout
@@ -167,15 +191,16 @@ export default function Export() {
 
       // Setup hidden canvas
       const canvas = document.createElement('canvas');
-      // Set resolution
-      let canvasW = 1280;
-      let canvasH = 720;
+      // Set resolution based on user selection
+      const is1080 = resolution === '1080p';
+      let canvasW = is1080 ? 1920 : 1280;
+      let canvasH = is1080 ? 1080 : 720;
       if (activeClip.aspectRatio === '9:16') {
-        canvasW = 720;
-        canvasH = 1280;
+        canvasW = is1080 ? 1080 : 720;
+        canvasH = is1080 ? 1920 : 1280;
       } else if (activeClip.aspectRatio === '1:1') {
-        canvasW = 720;
-        canvasH = 720;
+        canvasW = is1080 ? 1080 : 720;
+        canvasH = is1080 ? 1080 : 720;
       }
       
       canvas.width = canvasW;
@@ -209,14 +234,19 @@ export default function Export() {
       canvasStream.getVideoTracks().forEach(track => mixedStream.addTrack(track));
       dest.stream.getAudioTracks().forEach(track => mixedStream.addTrack(track));
 
-      // Setup MediaRecorder
-      const options = { mimeType: `video/${format};codecs=vp9,opus` };
+      // Setup MediaRecorder - force WebM since browsers don't support MP4 in MediaRecorder
+      const recordFormat = 'webm'; // Always use webm for MediaRecorder compatibility
+      const options = { mimeType: `video/${recordFormat};codecs=vp9,opus` };
       let recorder;
       try {
         recorder = new MediaRecorder(mixedStream, options);
       } catch (e) {
         // Fallback codec if VP9 is not supported
-        recorder = new MediaRecorder(mixedStream, { mimeType: `video/${format}` });
+        try {
+          recorder = new MediaRecorder(mixedStream, { mimeType: `video/${recordFormat};codecs=vp8,opus` });
+        } catch (e2) {
+          recorder = new MediaRecorder(mixedStream);
+        }
       }
 
       const chunks = [];
@@ -228,7 +258,7 @@ export default function Export() {
 
       recorder.onstop = async () => {
         updateQueueItem(exportId, { progress: 95 });
-        const videoBlob = new Blob(chunks, { type: `video/${format}` });
+        const videoBlob = new Blob(chunks, { type: 'video/webm' });
         const outputBlobUrl = URL.createObjectURL(videoBlob);
         
         // Generate thumbnail frame from canvas with safe fallback
@@ -265,10 +295,13 @@ export default function Export() {
         loadGallery();
       };
 
+      // Store active render resources for cancellation support
+      activeRendersRef.current.set(exportId, { interval: null, recorder, audioCtx, video, bgAudio });
+
       // Start recording
       recorder.start();
-      video.play();
-      if (bgAudio) bgAudio.play();
+      await video.play().catch(err => { throw new Error('Browser blocked video playback: ' + err.message); });
+      if (bgAudio) await bgAudio.play().catch(err => console.warn('Background music play blocked:', err));
 
       // Rendering frame loop
       const drawInterval = setInterval(() => {
@@ -277,6 +310,7 @@ export default function Export() {
           video.pause();
           if (bgAudio) bgAudio.pause();
           recorder.stop();
+          activeRendersRef.current.delete(exportId);
           return;
         }
 
@@ -329,7 +363,7 @@ export default function Export() {
 
         // 4. Draw Karaoke captions burned-in
         const time = video.currentTime;
-        const activeCaption = captions.find(c => time >= c.start && time < (c.start + c.duration));
+        const activeCaption = (captions || []).find(c => time >= c.start && time < (c.start + c.duration));
         
         if (activeCaption) {
           const style = activeClip.editingState.captionStyle;
@@ -436,14 +470,32 @@ export default function Export() {
 
         // Speech-aware audio ducking mix node controls
         if (activeClip.editingState.voiceDucking && bgGain) {
-          const isSpeaking = captions.some(c => video.currentTime >= c.start && video.currentTime < (c.start + c.duration));
+          const isSpeaking = (captions || []).some(c => video.currentTime >= c.start && video.currentTime < (c.start + c.duration));
           bgGain.gain.value = isSpeaking ? activeClip.editingState.bgMusicVolume * 0.25 : activeClip.editingState.bgMusicVolume;
         }
 
       }, 1000 / fps);
 
+      // Update the stored interval reference
+      const renderEntry = activeRendersRef.current.get(exportId);
+      if (renderEntry) renderEntry.interval = drawInterval;
+
     } catch (err) {
       console.error("Rendering failed:", err);
+      // Clean up any resources that were created before the error
+      const entry = activeRendersRef.current.get(exportId);
+      if (entry) {
+        if (entry.interval) clearInterval(entry.interval);
+        if (entry.recorder && entry.recorder.state !== 'inactive') {
+          try { entry.recorder.stop(); } catch (_) {}
+        }
+        if (entry.audioCtx && entry.audioCtx.state !== 'closed') {
+          try { entry.audioCtx.close(); } catch (_) {}
+        }
+        if (entry.video) entry.video.pause();
+        if (entry.bgAudio) entry.bgAudio.pause();
+        activeRendersRef.current.delete(exportId);
+      }
       updateQueueItem(exportId, { status: 'failed', error: err.message || 'Export error' });
       toast.error(`Rendering failed: ${err.message}`);
     }
@@ -482,6 +534,9 @@ export default function Export() {
       link.download = `ai_clipped_bundle_${currentVideo ? currentVideo.id : 'exports'}.zip`;
       link.click();
       
+      // Revoke blob URL after download triggers to avoid memory leak
+      setTimeout(() => URL.revokeObjectURL(zipUrl), 5000);
+      
       toast.success("ZIP archive downloaded successfully!");
     } catch (err) {
       console.error("ZIP creation error:", err);
@@ -508,11 +563,13 @@ export default function Export() {
     
     // Trigger download
     const link = document.createElement('a');
-    link.href = URL.createObjectURL(item.blob);
+    const shareBlobUrl = URL.createObjectURL(item.blob);
+    link.href = shareBlobUrl;
     link.download = downloadFilename;
     link.click();
     
     setTimeout(() => {
+      URL.revokeObjectURL(shareBlobUrl);
       window.open(shareUrl, '_blank');
     }, 1200);
   }
@@ -563,8 +620,8 @@ export default function Export() {
                     onChange={(e) => setFormat(e.target.value)}
                     className="w-full px-3 py-2 bg-black/40 border border-white/10 rounded-xl text-xs text-white outline-none focus:border-brand-purple"
                   >
-                    <option value="webm">WebM (Fast codec)</option>
-                    <option value="mp4">MP4 (Standard H.264)</option>
+                    <option value="webm">WebM (VP9 codec — Best quality)</option>
+                    <option value="webm-vp8">WebM (VP8 codec — Maximum compatibility)</option>
                   </select>
                 </div>
                 <div className="space-y-1.5">
@@ -662,7 +719,23 @@ export default function Export() {
                       {/* Cancel render */}
                       {item.status !== 'completed' && item.status !== 'failed' && (
                         <button
-                          onClick={() => removeFromQueue(item.id)}
+                          onClick={() => {
+                            // Stop the actual render resources
+                            const entry = activeRendersRef.current.get(item.id);
+                            if (entry) {
+                              if (entry.interval) clearInterval(entry.interval);
+                              if (entry.recorder && entry.recorder.state !== 'inactive') {
+                                try { entry.recorder.stop(); } catch (_) {}
+                              }
+                              if (entry.audioCtx && entry.audioCtx.state !== 'closed') {
+                                try { entry.audioCtx.close(); } catch (_) {}
+                              }
+                              if (entry.video) entry.video.pause();
+                              if (entry.bgAudio) entry.bgAudio.pause();
+                              activeRendersRef.current.delete(item.id);
+                            }
+                            removeFromQueue(item.id);
+                          }}
                           className="absolute right-3 top-3 text-[10px] font-bold text-zinc-500 hover:text-red-500 transition cursor-pointer"
                         >
                           Cancel
@@ -725,7 +798,6 @@ export default function Export() {
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
             {gallery.map((item) => {
               const downloadFilename = `AI_Clipped_${item.title.replace(/\s+/g, '_')}.webm`;
-              const blobUrl = URL.createObjectURL(item.blob);
               
               return (
                 <div
@@ -777,13 +849,19 @@ export default function Export() {
                     </div>
 
                     <div className="grid grid-cols-2 gap-2 pt-2 border-t border-white/5">
-                      <a
-                        href={blobUrl}
-                        download={downloadFilename}
+                      <button
+                        onClick={() => {
+                          const url = URL.createObjectURL(item.blob);
+                          const a = document.createElement('a');
+                          a.href = url;
+                          a.download = downloadFilename;
+                          a.click();
+                          setTimeout(() => URL.revokeObjectURL(url), 5000);
+                        }}
                         className="py-2 bg-white/5 border border-white/5 hover:bg-white/10 text-white rounded-lg text-xs font-bold transition text-center flex items-center justify-center gap-1 cursor-pointer"
                       >
                         <Download className="w-3.5 h-3.5" /> Download
-                      </a>
+                      </button>
                       <button
                         onClick={() => navigate(`/editor/${item.clipId}`)}
                         className="py-2 border border-white/5 hover:bg-white/5 text-zinc-300 rounded-lg text-xs font-bold transition flex items-center justify-center gap-1 cursor-pointer"
@@ -811,9 +889,7 @@ export default function Export() {
         )}
       </section>
 
-      {/* Hidden HTML5 Video and Audio nodes for background rendering */}
-      <video ref={renderVideoRef} style={{ display: 'none' }} />
-      <audio ref={renderAudioRef} style={{ display: 'none' }} />
+
 
     </div>
   );

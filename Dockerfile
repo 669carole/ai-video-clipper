@@ -29,5 +29,8 @@ RUN npm run build
 # Expose port
 EXPOSE 5173
 
-# Start the preview server
-CMD ["npm", "run", "preview"]
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD curl -f http://localhost:5173/ || exit 1
+
+# Start the preview server (uses configurePreviewServer hook for API routes)
+CMD ["npm", "run", "preview", "--", "--host", "0.0.0.0"]

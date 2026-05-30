@@ -1,6 +1,6 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
+import { Component } from 'react';
 
 import Home from './pages/Home';
 import Editor from './pages/Editor';
@@ -8,18 +8,43 @@ import Export from './pages/Export';
 import Settings from './pages/Settings';
 import Navigation from './components/Navigation';
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      refetchOnWindowFocus: false,
-      retry: false
-    }
+// Error Boundary to catch uncaught React errors and prevent white screen
+class ErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
   }
-});
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error, info) {
+    console.error('React Error Boundary caught:', error, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: '#09090b', color: '#f4f4f5', fontFamily: 'system-ui', padding: '2rem', textAlign: 'center' }}>
+          <div style={{ fontSize: '48px', marginBottom: '16px' }}>⚠️</div>
+          <h1 style={{ fontSize: '24px', fontWeight: 700, marginBottom: '8px' }}>Something went wrong</h1>
+          <p style={{ color: '#a1a1aa', fontSize: '14px', maxWidth: '400px', marginBottom: '24px' }}>
+            {this.state.error?.message || 'An unexpected error occurred. Please refresh the page.'}
+          </p>
+          <button
+            onClick={() => window.location.reload()}
+            style={{ padding: '10px 24px', background: '#8b5cf6', color: 'white', border: 'none', borderRadius: '12px', fontSize: '14px', fontWeight: 700, cursor: 'pointer' }}
+          >
+            Reload Application
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 export default function App() {
   return (
-    <QueryClientProvider client={queryClient}>
+    <ErrorBoundary>
       <BrowserRouter>
         <div className="min-h-screen w-screen bg-gradient-animated flex flex-col relative text-zinc-100 overflow-y-auto">
           {/* Subtle Ambient Light Gradients */}
@@ -77,6 +102,6 @@ export default function App() {
           />
         </div>
       </BrowserRouter>
-    </QueryClientProvider>
+    </ErrorBoundary>
   );
 }

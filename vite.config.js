@@ -104,16 +104,12 @@ async function fetchInvidiousMetadata(videoId) {
   const candidates = [
     'https://inv.thepixora.com',
     'https://invidious.nerdvpn.de',
-    'https://yewtu.be',
-    'https://invidious.f5.si',
-    'https://yt.chocolatemoo53.com',
-    'https://inv.nadeko.net',
+    'https://vid.puffyan.us',
+    'https://invidious.snopyta.org',
+    'https://invidious.kavin.rocks',
+    'https://y.com.sb',
     'https://invidious.tiekoetter.com',
-    'https://invidious.flokinet.to',
-    'https://invidious.privacydev.net',
-    'https://invidious.projectsegfau.lt',
-    'https://invidious.lunar.icu',
-    'https://invidious.slipfox.xyz'
+    'https://invidious.projectsegfau.lt'
   ];
   
   console.log(`Running parallel race across ${candidates.length} Invidious instances for video: ${videoId}`);

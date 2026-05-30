@@ -2,30 +2,33 @@ import { useClipStore } from '../stores/clipStore';
 
 // Progressive model loading
 let classifierInstance = null;
-let isLoadingModel = false;
+let loadingPromise = null;
 
 async function getClassifier() {
   if (classifierInstance) return classifierInstance;
-  if (isLoadingModel) return null;
+  if (loadingPromise) return loadingPromise;
   
-  isLoadingModel = true;
-  try {
-    const { pipeline } = await import('@xenova/transformers');
-    // Load DistilBERT for English sentiment analysis
-    classifierInstance = await pipeline('sentiment-analysis', 'Xenova/distilbert-base-uncased-finetuned-sst-2-english', {
-      progress_callback: (data) => {
-        if (data.status === 'progress') {
-          useClipStore.getState().setMomentDetectionProgress(Math.round(data.progress || 0));
+  loadingPromise = (async () => {
+    try {
+      const { pipeline } = await import('@xenova/transformers');
+      // Load DistilBERT for English sentiment analysis
+      classifierInstance = await pipeline('sentiment-analysis', 'Xenova/distilbert-base-uncased-finetuned-sst-2-english', {
+        progress_callback: (data) => {
+          if (data.status === 'progress') {
+            useClipStore.getState().setMomentDetectionProgress(Math.round(data.progress || 0));
+          }
         }
-      }
-    });
-    isLoadingModel = false;
-    return classifierInstance;
-  } catch (err) {
-    console.warn("Transformers.js loading failed or bypassed, falling back to rule-based NLP:", err);
-    isLoadingModel = false;
-    return null;
-  }
+      });
+      return classifierInstance;
+    } catch (err) {
+      console.warn("Transformers.js loading failed or bypassed, falling back to rule-based NLP:", err);
+      return null;
+    } finally {
+      loadingPromise = null;
+    }
+  })();
+  
+  return loadingPromise;
 }
 
 export async function detectViralMoments(captions, duration, onProgress) {
@@ -97,11 +100,11 @@ export async function detectViralMoments(captions, duration, onProgress) {
       
       positiveWords.forEach(w => {
         const regex = new RegExp(`\\b${w}\\b`, 'gi');
-        posCount += (seg.text.match(regex) || []).length;
+        posCount += (lowerText.match(regex) || []).length;
       });
       negativeWords.forEach(w => {
         const regex = new RegExp(`\\b${w}\\b`, 'gi');
-        negCount += (seg.text.match(regex) || []).length;
+        negCount += (lowerText.match(regex) || []).length;
       });
       
       // Extreme emotion implies virality

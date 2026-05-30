@@ -1,3 +1,6 @@
+// Module-level AbortController for cancelling in-flight fetchVideoDetails calls
+let _fetchVideoDetailsController = null;
+
 export function getYoutubeId(url) {
   if (!url) return null;
   const cleanUrl = url.trim();
@@ -23,20 +26,16 @@ export function getYoutubeId(url) {
   return null;
 }
 
-async function fetchInvidiousMetadataClientSide(videoId) {
+async function fetchInvidiousMetadataClientSide(videoId, externalSignal) {
   const candidates = [
     'https://inv.thepixora.com',
     'https://invidious.nerdvpn.de',
-    'https://yewtu.be',
-    'https://invidious.f5.si',
-    'https://yt.chocolatemoo53.com',
-    'https://inv.nadeko.net',
+    'https://vid.puffyan.us',
+    'https://invidious.snopyta.org',
+    'https://invidious.kavin.rocks',
+    'https://y.com.sb',
     'https://invidious.tiekoetter.com',
-    'https://invidious.flokinet.to',
-    'https://invidious.privacydev.net',
-    'https://invidious.projectsegfau.lt',
-    'https://invidious.lunar.icu',
-    'https://invidious.slipfox.xyz'
+    'https://invidious.projectsegfau.lt'
   ];
   
   console.log(`Client-side fallback: Racing ${candidates.length} Invidious instances...`);
@@ -45,6 +44,13 @@ async function fetchInvidiousMetadataClientSide(videoId) {
     const url = `${baseUri}/api/v1/videos/${videoId}`;
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 5000); // 5s timeout
+
+    // Abort per-instance controller if the external signal fires
+    const onExternalAbort = () => controller.abort();
+    if (externalSignal) {
+      if (externalSignal.aborted) throw new Error('Aborted');
+      externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
     
     try {
       const res = await fetch(url, { signal: controller.signal });
@@ -55,7 +61,11 @@ async function fetchInvidiousMetadataClientSide(videoId) {
           return { videoData, baseUri };
         }
       }
-    } catch (e) {}
+    } catch (e) {
+      // fall through
+    } finally {
+      if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
+    }
     throw new Error(`Failed to fetch from ${baseUri}`);
   });
   
@@ -218,14 +228,32 @@ function mapInvidiousResponse(videoData, baseUri) {
   };
 }
 
-export async function fetchVideoDetails(url) {
+export async function fetchVideoDetails(url, externalSignal) {
+  // Abort any previous in-flight fetchVideoDetails call
+  if (_fetchVideoDetailsController) {
+    _fetchVideoDetailsController.abort();
+  }
+  _fetchVideoDetailsController = new AbortController();
+  const signal = _fetchVideoDetailsController.signal;
+
+  // If the caller supplied an external signal, forward its abort
+  const onExternalAbort = () => _fetchVideoDetailsController?.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      _fetchVideoDetailsController.abort();
+    } else {
+      externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
+  }
+
   try {
     // 1. Try backend server extraction (yt-dlp or server-side fallback)
-    const response = await fetch(`/api/youtube/info?url=${encodeURIComponent(url)}`);
+    const response = await fetch(`/api/youtube/info?url=${encodeURIComponent(url)}`, { signal });
     if (response.ok) {
       return await response.json();
     }
   } catch (backendErr) {
+    if (signal.aborted) throw new DOMException('Fetch aborted', 'AbortError');
     console.warn("Backend video fetch failed, proceeding to client-side fallback:", backendErr);
   }
 
@@ -235,7 +263,8 @@ export async function fetchVideoDetails(url) {
     throw new Error("Could not extract a valid YouTube video ID from the URL.");
   }
 
-  const clientFallback = await fetchInvidiousMetadataClientSide(videoId);
+  if (signal.aborted) throw new DOMException('Fetch aborted', 'AbortError');
+  const clientFallback = await fetchInvidiousMetadataClientSide(videoId, signal);
   if (!clientFallback) {
     throw new Error("All extraction methods failed (Server and Client fallback). Please try another video.");
   }
@@ -245,11 +274,11 @@ export async function fetchVideoDetails(url) {
 
   // Fetch captions client-side if available
   if (mappedData.captions && mappedData.captions.length > 0) {
-    const enCap = mappedData.captions.find(c => c.language_code === 'en' || c.label.toLowerCase().includes('english'));
+    const enCap = mappedData.captions.find(c => c.language_code === 'en' || c.label?.toLowerCase()?.includes('english'));
     if (enCap && enCap.url) {
       try {
         const capUrl = `${mappedData.baseUri}${enCap.url}`;
-        const capRes = await fetch(capUrl);
+        const capRes = await fetch(capUrl, { signal });
         if (capRes.ok) {
           const capText = await capRes.text();
           mappedData.captions = mappedData.parseCaptions(capText);
@@ -270,6 +299,9 @@ export async function fetchVideoDetails(url) {
   // Remove the temporary parser method from final data
   delete mappedData.parseCaptions;
   delete mappedData.baseUri;
+
+  // Clean up external signal listener
+  if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
 
   return mappedData;
 }

@@ -141,8 +141,9 @@ export default function Home() {
     }
   }
 
-  function handleSelectMoment(moment) {
-    const clipId = `clip-${Date.now()}`;
+  function handleSelectMoment(moment, skipNavigation = false) {
+    const clipId = `clip-${crypto.randomUUID ? crypto.randomUUID() : Date.now() + '-' + Math.random().toString(36).slice(2, 9)}`;
+    const reasonText = Array.isArray(moment.reason) ? moment.reason.join(', ') : (moment.reason || 'AI Detected Moment');
     const newClip = {
       id: clipId,
       videoId: currentVideo.id,
@@ -150,7 +151,7 @@ export default function Home() {
       start: moment.start,
       end: moment.end,
       viralityScore: moment.score,
-      reason: moment.reason.join(', '),
+      reason: reasonText,
       aspectRatio: '9:16', // vertical default
       editingState: {
         captionStyle: {
@@ -173,8 +174,12 @@ export default function Home() {
     addClip(newClip);
     saveClip(newClip);
     
-    toast.success('Clip created! Redirecting to Editor...');
-    navigate(`/editor/${clipId}`);
+    if (!skipNavigation) {
+      toast.success('Clip created! Redirecting to Editor...');
+      navigate(`/editor/${clipId}`);
+    }
+    
+    return clipId;
   }
 
   async function handleDeleteRecentClip(e, id) {
@@ -326,13 +331,15 @@ export default function Home() {
                     onClick={() => {
                       // Select all high impact moments (>70)
                       const highImpact = detectedMoments.filter(m => m.score >= 70);
+                      let lastClipId;
                       if (highImpact.length === 0) {
                         toast.info("No moments with score >= 70%. Selecting top 3.");
-                        detectedMoments.slice(0, 3).forEach(handleSelectMoment);
+                        detectedMoments.slice(0, 3).forEach(m => { lastClipId = handleSelectMoment(m, true); });
                       } else {
-                        highImpact.forEach(handleSelectMoment);
+                        highImpact.forEach(m => { lastClipId = handleSelectMoment(m, true); });
                         toast.success(`Selected and added ${highImpact.length} clips to your editor!`);
                       }
+                      if (lastClipId) navigate(`/editor/${lastClipId}`);
                     }}
                     className="text-xs font-semibold text-brand-cyan hover:underline cursor-pointer flex items-center gap-1"
                   >

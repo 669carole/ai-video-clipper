@@ -38,8 +38,12 @@ export default function Settings() {
   }, []);
 
   async function loadStorageStats() {
-    const stats = await getStorageUsage();
-    setStorageStats(stats);
+    try {
+      const stats = await getStorageUsage();
+      setStorageStats(stats);
+    } catch (err) {
+      console.error("Failed to load storage stats:", err);
+    }
   }
 
   async function handleClearDatabase() {

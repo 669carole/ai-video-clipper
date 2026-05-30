@@ -1,6 +1,5 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { motion } from 'framer-motion';
 import { toast } from 'sonner';
 import { 
   Play, Pause, Volume2, Music, Crop, Type, Sliders, 
@@ -27,6 +26,10 @@ export default function Editor() {
   const videoRef = useRef(null);
   const audioBgRef = useRef(null);
   const waveformCanvasRef = useRef(null);
+  const canvasContainerRef = useRef(null);
+  const isPlayingRef = useRef(false);
+  const currentTimeRef = useRef(0);
+  const waveformRafRef = useRef(null);
 
   // Editing state
   const [isPlaying, setIsPlaying] = useState(false);
@@ -117,11 +120,27 @@ export default function Editor() {
 
     // Fetch waveform
     const audioStream = formats.find(f => f.acodec !== 'none' && f.vcodec === 'none') || formats[0];
-    if (audioStream) {
+    if (audioStream?.url) {
       generateWaveform(audioStream.url, currentVideo.duration)
         .then(peaks => setWaveform(peaks));
     }
   }, [clipId, currentVideo]);
+
+  // Keep isPlayingRef in sync with isPlaying state
+  useEffect(() => {
+    isPlayingRef.current = isPlaying;
+  }, [isPlaying]);
+
+  // Cleanup on unmount: pause video and audio
+  useEffect(() => {
+    return () => {
+      videoRef.current?.pause();
+      audioBgRef.current?.pause();
+      if (waveformRafRef.current) {
+        cancelAnimationFrame(waveformRafRef.current);
+      }
+    };
+  }, []);
 
   // Load background music if selected
   useEffect(() => {
@@ -164,12 +183,14 @@ export default function Editor() {
     if (!videoRef.current || !clip) return;
     const time = videoRef.current.currentTime;
     setCurrentTime(time);
+    currentTimeRef.current = time;
 
     // Check boundaries: Loop or Pause when ending clip
     if (time >= clip.end) {
       videoRef.current.currentTime = clip.start;
       setCurrentTime(clip.start);
-      if (!isPlaying) {
+      currentTimeRef.current = clip.start;
+      if (!isPlayingRef.current) {
         videoRef.current.pause();
         audioBgRef.current?.pause();
         setIsPlaying(false);
@@ -197,71 +218,126 @@ export default function Editor() {
     }
   }
 
-  // Draw Audio Waveform inside the Canvas
+  // Draw Audio Waveform inside the Canvas (RAF-throttled for playback pointer)
   useEffect(() => {
     if (!waveformCanvasRef.current || waveform.length === 0 || !clip) return;
     const canvas = waveformCanvasRef.current;
     const ctx = canvas.getContext('2d');
-    const w = canvas.width;
-    const h = canvas.height;
 
-    ctx.clearRect(0, 0, w, h);
-    
-    // Draw background waveform bars
-    const barWidth = w / waveform.length;
-    waveform.forEach((val, index) => {
-      const x = index * barWidth;
-      const barHeight = val * h * 0.8;
-      const y = (h - barHeight) / 2;
-
-      // Check if bar is inside the active clip start/end range
-      const timeAtIdx = (index / waveform.length) * duration;
-      const isInside = timeAtIdx >= clip.start && timeAtIdx <= clip.end;
-
-      if (isInside) {
-        ctx.fillStyle = 'rgba(139, 92, 246, 0.7)'; // Purple active range
-      } else {
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.15)'; // Dim inactive range
+    // Dynamically size canvas to container width with DPI scaling for Retina
+    const dpr = window.devicePixelRatio || 1;
+    function resizeCanvas() {
+      const container = canvasContainerRef.current;
+      if (container) {
+        const rect = container.getBoundingClientRect();
+        const newWidth = Math.round(rect.width);
+        const targetW = newWidth * dpr;
+        const targetH = 90 * dpr;
+        if (canvas.width !== targetW || canvas.height !== targetH) {
+          canvas.width = targetW;
+          canvas.height = targetH;
+          ctx.scale(dpr, dpr);
+        }
       }
-      
-      // Draw bar rounded
-      ctx.fillRect(x + 1, y, barWidth - 2, barHeight);
-    });
+    }
 
-    // Draw current playback pointer line
-    const playbackPct = currentTime / duration;
-    const pointerX = playbackPct * w;
-    ctx.strokeStyle = '#ec4899'; // Pink pointer
-    ctx.lineWidth = 2.5;
-    ctx.beginPath();
-    ctx.moveTo(pointerX, 0);
-    ctx.lineTo(pointerX, h);
-    ctx.stroke();
+    resizeCanvas();
 
-    // Draw Trim handle borders
-    const startX = (clip.start / duration) * w;
-    const endX = (clip.end / duration) * w;
-    
-    ctx.strokeStyle = '#8b5cf6'; // Purple trim borders
-    ctx.lineWidth = 3.5;
-    
-    // Start Handle
-    ctx.beginPath();
-    ctx.moveTo(startX, 0);
-    ctx.lineTo(startX, h);
-    ctx.stroke();
-    ctx.fillStyle = '#8b5cf6';
-    ctx.fillRect(startX - 6, h/2 - 12, 12, 24);
+    // Observe container resizes
+    let observer;
+    if (canvasContainerRef.current && typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(() => {
+        resizeCanvas();
+        drawWaveform();
+      });
+      observer.observe(canvasContainerRef.current);
+    }
 
-    // End Handle
-    ctx.beginPath();
-    ctx.moveTo(endX, 0);
-    ctx.lineTo(endX, h);
-    ctx.stroke();
-    ctx.fillStyle = '#8b5cf6';
-    ctx.fillRect(endX - 6, h/2 - 12, 12, 24);
+    function drawWaveform() {
+      const w = canvas.width / dpr;
+      const h = canvas.height / dpr;
 
-  }, [waveform, clip, currentTime, duration]);
+      ctx.clearRect(0, 0, w, h);
+
+      // Draw background waveform bars
+      const barWidth = w / waveform.length;
+      waveform.forEach((val, index) => {
+        const x = index * barWidth;
+        const barHeight = val * h * 0.8;
+        const y = (h - barHeight) / 2;
+
+        // Check if bar is inside the active clip start/end range
+        const timeAtIdx = (index / waveform.length) * duration;
+        const isInside = timeAtIdx >= clip.start && timeAtIdx <= clip.end;
+
+        if (isInside) {
+          ctx.fillStyle = 'rgba(139, 92, 246, 0.7)'; // Purple active range
+        } else {
+          ctx.fillStyle = 'rgba(255, 255, 255, 0.15)'; // Dim inactive range
+        }
+
+        // Draw bar rounded
+        ctx.fillRect(x + 1, y, barWidth - 2, barHeight);
+      });
+
+      // Draw current playback pointer line
+      const playbackPct = currentTimeRef.current / duration;
+      const pointerX = playbackPct * w;
+      ctx.strokeStyle = '#ec4899'; // Pink pointer
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.moveTo(pointerX, 0);
+      ctx.lineTo(pointerX, h);
+      ctx.stroke();
+
+      // Draw Trim handle borders
+      const startX = (clip.start / duration) * w;
+      const endX = (clip.end / duration) * w;
+
+      ctx.strokeStyle = '#8b5cf6'; // Purple trim borders
+      ctx.lineWidth = 3.5;
+
+      // Start Handle
+      ctx.beginPath();
+      ctx.moveTo(startX, 0);
+      ctx.lineTo(startX, h);
+      ctx.stroke();
+      ctx.fillStyle = '#8b5cf6';
+      ctx.fillRect(startX - 6, h/2 - 12, 12, 24);
+
+      // End Handle
+      ctx.beginPath();
+      ctx.moveTo(endX, 0);
+      ctx.lineTo(endX, h);
+      ctx.stroke();
+      ctx.fillStyle = '#8b5cf6';
+      ctx.fillRect(endX - 6, h/2 - 12, 12, 24);
+    }
+
+    // Use RAF loop to redraw pointer without reacting to currentTime state
+    let running = true;
+    function tick() {
+      if (!running) return;
+      drawWaveform();
+      waveformRafRef.current = requestAnimationFrame(tick);
+    }
+    // Only run RAF loop while playing; draw once when paused
+    if (isPlayingRef.current) {
+      tick();
+    } else {
+      drawWaveform();
+    }
+
+    return () => {
+      running = false;
+      if (waveformRafRef.current) {
+        cancelAnimationFrame(waveformRafRef.current);
+      }
+      if (observer) {
+        observer.disconnect();
+      }
+    };
+  }, [waveform, clip, duration, isPlaying]);
 
   // Handle timeline scrubber drag clicks
   function handleTimelineClick(e) {
@@ -293,21 +369,28 @@ export default function Editor() {
   }
 
   function updateLocalClip(updates) {
-    setLocalClip(prev => {
-      const merged = { ...prev, ...updates };
-      // Sync to Zustand state store
-      updateClip(prev.id, updates);
-      return merged;
-    });
+    setLocalClip(prev => ({ ...prev, ...updates }));
+    // Sync to Zustand state store (side effect outside of setState updater)
+    if (clip?.id) updateClip(clip.id, updates);
   }
 
   function updateEditingState(field, value) {
-    updateLocalClip({
+    setLocalClip(prev => ({
+      ...prev,
       editingState: {
-        ...clip.editingState,
+        ...prev.editingState,
         [field]: value
       }
-    });
+    }));
+    // Sync to Zustand
+    if (clip?.id) {
+      updateClip(clip.id, {
+        editingState: {
+          ...clip.editingState,
+          [field]: value
+        }
+      });
+    }
   }
 
   function getActiveCaption(time) {
@@ -439,7 +522,11 @@ export default function Editor() {
             <video
               ref={videoRef}
               src={previewStream ? previewStream.url : ''}
+              crossOrigin="anonymous"
               onTimeUpdate={handleTimeUpdate}
+              onError={() => {
+                toast.error('Video stream expired or failed to load. Please re-fetch the video from the Home page.');
+              }}
               className="absolute max-w-none transition-all duration-300"
               style={{
                 filter: filterPresets.find(p => p.name === clip.editingState.colorFilter)?.css || 'none',
@@ -493,7 +580,7 @@ export default function Editor() {
               {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 fill-current ml-0.5" />}
             </button>
             <div className="flex-1 text-xs text-zinc-400 font-semibold px-2 font-mono">
-              {formatDuration(currentTime - clip.start)} / {formatDuration(clip.end - clip.start)}
+              {formatDuration(Math.max(0, currentTime - clip.start))} / {formatDuration(clip.end - clip.start)}
             </div>
             <div className="flex items-center gap-1.5 text-zinc-500">
               <Volume2 className="w-4 h-4" />
@@ -553,10 +640,9 @@ export default function Editor() {
                   </div>
                   
                   {/* Waveform Canvas Timeline Track */}
-                  <div className="relative">
+                  <div className="relative" ref={canvasContainerRef}>
                     <canvas
                       ref={waveformCanvasRef}
-                      width={600}
                       height={90}
                       onClick={handleTimelineClick}
                       className="w-full h-[90px] rounded-xl bg-zinc-950/70 border border-white/5 cursor-ew-resize shadow-inner block"
