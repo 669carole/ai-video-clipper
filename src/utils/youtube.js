@@ -108,11 +108,10 @@ function mapInvidiousResponse(videoData, baseUri) {
     for (const f of videoData.formatStreams) {
       const { width, height } = parseSize(f.size);
       const rewrittenUrl = rewriteToProxy(f.url);
-      const proxiedUrl = `/api/youtube/stream?url=${encodeURIComponent(rewrittenUrl)}`;
       formats.push({
         id: f.itag,
         ext: f.container || 'mp4',
-        url: proxiedUrl,
+        url: rewrittenUrl,
         rawUrl: rewrittenUrl,
         resolution: f.resolution || f.qualityLabel || (height ? `${height}p` : undefined),
         width: width,
@@ -141,11 +140,10 @@ function mapInvidiousResponse(videoData, baseUri) {
       }
       
       const rewrittenUrl = rewriteToProxy(f.url);
-      const proxiedUrl = `/api/youtube/stream?url=${encodeURIComponent(rewrittenUrl)}`;
       formats.push({
         id: f.itag,
         ext: f.container || 'mp4',
-        url: proxiedUrl,
+        url: rewrittenUrl,
         rawUrl: rewrittenUrl,
         resolution: f.resolution || f.qualityLabel || (height ? `${height}p` : undefined),
         width: width,

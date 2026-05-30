@@ -156,6 +156,43 @@ async function fetchInvidiousMetadata(videoId) {
   return null;
 }
 
+async function findWinningInvidiousProxy() {
+  const candidates = [
+    'https://inv.thepixora.com',
+    'https://invidious.nerdvpn.de',
+    'https://vid.puffyan.us',
+    'https://invidious.snopyta.org',
+    'https://invidious.kavin.rocks',
+    'https://y.com.sb',
+    'https://invidious.tiekoetter.com',
+    'https://invidious.projectsegfau.lt'
+  ];
+  
+  const testVideoId = 'dQw4w9WgXcQ';
+  const promises = candidates.map(async (baseUri) => {
+    const url = `${baseUri}/api/v1/videos/${testVideoId}`;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3000);
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (res.status === 200) {
+        // Double check if CORS is enabled
+        if (res.headers.get('access-control-allow-origin') === '*' || baseUri.includes('thepixora')) {
+          return baseUri;
+        }
+      }
+    } catch (e) {}
+    throw new Error('Failed');
+  });
+  
+  try {
+    return await Promise.any(promises);
+  } catch (e) {
+    return 'https://inv.thepixora.com'; // Default fallback
+  }
+}
+
 function proxyStream(targetUrl, req, res, depth = 0) {
   if (depth > 5) {
     res.statusCode = 500;
@@ -345,11 +382,10 @@ function setupYoutubeProxy(middlewares) {
                   height = parseInt(parts[1]);
                 }
                 const rewrittenUrl = rewriteToProxy(f.url);
-                const proxiedUrl = `/api/youtube/stream?url=${encodeURIComponent(rewrittenUrl)}`;
                 formats.push({
                   id: f.itag,
                   ext: f.container || 'mp4',
-                  url: proxiedUrl,
+                  url: rewrittenUrl,
                   rawUrl: rewrittenUrl,
                   resolution: f.resolution || f.qualityLabel || (height ? `${height}p` : undefined),
                   width: width,
@@ -385,11 +421,10 @@ function setupYoutubeProxy(middlewares) {
                 }
                 
                 const rewrittenUrl = rewriteToProxy(f.url);
-                const proxiedUrl = `/api/youtube/stream?url=${encodeURIComponent(rewrittenUrl)}`;
                 formats.push({
                   id: f.itag,
                   ext: f.container || 'mp4',
-                  url: proxiedUrl,
+                  url: rewrittenUrl,
                   rawUrl: rewrittenUrl,
                   resolution: f.resolution || f.qualityLabel || (height ? `${height}p` : undefined),
                   width: width,
@@ -442,6 +477,18 @@ function setupYoutubeProxy(middlewares) {
           try {
             const metadata = JSON.parse(stdout);
             
+            // Find winning Invidious proxy to route googlevideo URLs directly to client browser
+            const winningProxy = await findWinningInvidiousProxy();
+            const rewriteToProxy = (rawUrl) => {
+              if (rawUrl && rawUrl.includes('googlevideo.com/videoplayback')) {
+                try {
+                  const gvUrl = new URL(rawUrl);
+                  return `${winningProxy}/videoplayback${gvUrl.search}`;
+                } catch (e) {}
+              }
+              return rawUrl;
+            };
+            
             // Fetch captions if available
             let captions = [];
             const enCaps = metadata.automatic_captions?.en || metadata.subtitles?.en;
@@ -483,11 +530,11 @@ function setupYoutubeProxy(middlewares) {
                 return !isManifest;
               })
               .map(f => {
-                const proxiedUrl = `/api/youtube/stream?url=${encodeURIComponent(f.url)}`;
+                const rewrittenUrl = rewriteToProxy(f.url);
                 return {
                   id: f.format_id,
                   ext: f.ext,
-                  url: proxiedUrl,
+                  url: rewrittenUrl,
                   rawUrl: f.url,
                   resolution: f.resolution,
                   width: f.width,
