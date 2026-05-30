@@ -167,16 +167,23 @@ function proxyStream(targetUrl, req, res, depth = 0) {
     const urlObj = new URL(targetUrl);
     const requestLib = targetUrl.startsWith('https') ? requestHttps : requestHttp;
 
-    const headers = { ...req.headers };
-    delete headers.host;
-    delete headers.referer;
-    delete headers.origin;
-    headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-    headers['Referer'] = 'https://www.youtube.com/';
+    // Filter headers to avoid leaking server-specific cookies or authentication tokens to YouTube
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Referer': 'https://www.youtube.com/'
+    };
 
-    // Forward range requests correctly
     if (req.headers.range) {
       headers['Range'] = req.headers.range;
+    }
+    if (req.headers.accept) {
+      headers['Accept'] = req.headers.accept;
+    }
+    if (req.headers['accept-encoding']) {
+      headers['Accept-Encoding'] = req.headers['accept-encoding'];
+    }
+    if (req.headers['accept-language']) {
+      headers['Accept-Language'] = req.headers['accept-language'];
     }
 
     const ytReq = requestLib(targetUrl, {
@@ -199,6 +206,12 @@ function proxyStream(targetUrl, req, res, depth = 0) {
 
       const resHeaders = { ...ytRes.headers };
       delete resHeaders['set-cookie'];
+      
+      // Remove any upstream CORS headers to prevent browser blocks due to duplicate headers
+      delete resHeaders['access-control-allow-origin'];
+      delete resHeaders['access-control-allow-headers'];
+      delete resHeaders['access-control-allow-methods'];
+      delete resHeaders['access-control-expose-headers'];
       
       res.writeHead(statusCode, resHeaders);
       ytRes.pipe(res);
