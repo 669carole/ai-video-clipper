@@ -14,6 +14,123 @@ const localNode = '/home/gc/node-v22/bin/node';
 const ytDlpPath = existsSync(localYtDlp) ? localYtDlp : 'yt-dlp';
 const nodePath = existsSync(localNode) ? localNode : 'node';
 
+// Helper to extract YouTube video ID from URL
+function extractVideoId(url) {
+  if (!url) return null;
+  const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
+  const match = url.match(regExp);
+  return (match && match[2].length === 11) ? match[2] : null;
+}
+
+// Simple WebVTT/SRT subtitle parser
+function parseWebVttOrSrt(text) {
+  const list = [];
+  if (!text) return list;
+  const lines = text.replace(/\r/g, '').split('\n');
+  let currentStart = null;
+  let currentEnd = null;
+  let currentTextParts = [];
+  
+  function parseTimestampToSeconds(ts) {
+    if (!ts) return 0;
+    const cleanTs = ts.replace(',', '.');
+    const parts = cleanTs.split(':');
+    let secs = 0;
+    if (parts.length === 3) {
+      secs = parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseFloat(parts[2]);
+    } else if (parts.length === 2) {
+      secs = parseInt(parts[0]) * 60 + parseFloat(parts[1]);
+    }
+    return secs;
+  }
+  
+  for (let line of lines) {
+    line = line.trim();
+    if (line.includes('-->')) {
+      if (currentStart !== null && currentTextParts.length > 0) {
+        list.push({
+          start: currentStart,
+          duration: Math.max(0.1, currentEnd - currentStart),
+          text: currentTextParts.join(' ')
+        });
+      }
+      currentTextParts = [];
+      const parts = line.split('-->').map(p => p.trim());
+      currentStart = parseTimestampToSeconds(parts[0]);
+      currentEnd = parseTimestampToSeconds(parts[1]);
+    } else if (line === '' || /^\d+$/.test(line) || line.startsWith('WEBVTT')) {
+      continue;
+    } else {
+      if (currentStart !== null) {
+        const cleanLine = line.replace(/<\/?[^>]+(>|$)/g, "");
+        if (cleanLine) {
+          currentTextParts.push(cleanLine);
+        }
+      }
+    }
+  }
+  if (currentStart !== null && currentTextParts.length > 0) {
+    list.push({
+      start: currentStart,
+      duration: Math.max(0.1, currentEnd - currentStart),
+      text: currentTextParts.join(' ')
+    });
+  }
+  return list;
+}
+
+// Invidious API metadata fetcher fallback
+async function fetchInvidiousMetadata(videoId) {
+  try {
+    console.log("Fetching Invidious public instances list...");
+    const instancesRes = await fetch('https://api.invidious.io/instances.json');
+    if (!instancesRes.ok) throw new Error("Failed to load Invidious instances directory");
+    const instancesData = await instancesRes.json();
+    
+    const healthyInstances = instancesData
+      .map(item => item[1])
+      .filter(inst => inst.type === 'https' && inst.monitor && inst.monitor.last_status === 200)
+      .map(inst => inst.uri);
+      
+    if (healthyInstances.length === 0) {
+      throw new Error("No active Invidious instances found in directory");
+    }
+    
+    // Always prioritize the ones known to work well or try a shuffled set
+    const instancesToTry = [...new Set([
+      'https://inv.thepixora.com',
+      'https://invidious.nerdvpn.de',
+      'https://yewtu.be',
+      ...healthyInstances
+    ])];
+    
+    for (const baseUri of instancesToTry) {
+      const url = `${baseUri}/api/v1/videos/${videoId}`;
+      console.log(`Invidious Fallback: Querying ${url}...`);
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 4000); // 4s timeout per instance
+        
+        const res = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeoutId);
+        
+        if (res.status === 200) {
+          const videoData = await res.json();
+          if (videoData && videoData.title) {
+            console.log(`Invidious Fallback: Success from ${baseUri}!`);
+            return { videoData, baseUri };
+          }
+        }
+      } catch (err) {
+        console.warn(`Invidious Fallback: Failed for ${baseUri}:`, err.message);
+      }
+    }
+  } catch (err) {
+    console.error("fetchInvidiousMetadata exception:", err.message);
+  }
+  return null;
+}
+
 function proxyStream(targetUrl, req, res, depth = 0) {
   if (depth > 5) {
     res.statusCode = 500;
@@ -105,10 +222,134 @@ function setupYoutubeProxy(middlewares) {
           videoUrl
         ], { maxBuffer: 15 * 1024 * 1024 }, async (err, stdout, stderr) => {
           if (err) {
-            console.error("yt-dlp execution error:", err.message);
-            res.statusCode = 500;
+            console.warn("yt-dlp failed, attempting Invidious fallback. Error:", err.message);
+            const videoId = extractVideoId(videoUrl);
+            if (!videoId) {
+              res.statusCode = 500;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ error: 'yt-dlp failed and no valid video ID extracted for fallback', details: err.message }));
+              return;
+            }
+            
+            const fallbackResult = await fetchInvidiousMetadata(videoId);
+            if (!fallbackResult) {
+              res.statusCode = 500;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ error: 'All extraction methods failed (yt-dlp and Invidious fallback)', details: err.message }));
+              return;
+            }
+            
+            const { videoData, baseUri } = fallbackResult;
+            
+            // Map thumbnails
+            let thumbnail = '';
+            if (videoData.videoThumbnails && videoData.videoThumbnails.length > 0) {
+              const thumb = videoData.videoThumbnails.find(t => t.quality === 'medium') || videoData.videoThumbnails[0];
+              thumbnail = thumb.url;
+            }
+            
+            // Map formats
+            const formats = [];
+            
+            // 1. Format streams (combined video + audio)
+            if (videoData.formatStreams) {
+              for (const f of videoData.formatStreams) {
+                let width = undefined, height = undefined;
+                if (f.size) {
+                  const parts = f.size.split('x');
+                  width = parseInt(parts[0]);
+                  height = parseInt(parts[1]);
+                }
+                const proxiedUrl = `/api/youtube/stream?url=${encodeURIComponent(f.url)}`;
+                formats.push({
+                  id: f.itag,
+                  ext: f.container || 'mp4',
+                  url: proxiedUrl,
+                  rawUrl: f.url,
+                  resolution: f.resolution || f.qualityLabel || (height ? `${height}p` : undefined),
+                  width: width,
+                  height: height,
+                  fps: f.fps || 30,
+                  vcodec: 'h264',
+                  acodec: 'aac',
+                  filesize: f.clen ? parseInt(f.clen) : undefined
+                });
+              }
+            }
+            
+            // 2. Adaptive formats (separate video and audio streams)
+            if (videoData.adaptiveFormats) {
+              for (const f of videoData.adaptiveFormats) {
+                let width = undefined, height = undefined;
+                if (f.size) {
+                  const parts = f.size.split('x');
+                  width = parseInt(parts[0]);
+                  height = parseInt(parts[1]);
+                }
+                
+                let vcodec = 'none', acodec = 'none';
+                if (f.type) {
+                  if (f.type.includes('video')) {
+                    const match = f.type.match(/codecs="([^"]+)"/);
+                    vcodec = match ? match[1].split(',')[0].trim() : 'yes';
+                    acodec = 'none';
+                  } else if (f.type.includes('audio')) {
+                    acodec = 'yes';
+                    vcodec = 'none';
+                  }
+                }
+                
+                const proxiedUrl = `/api/youtube/stream?url=${encodeURIComponent(f.url)}`;
+                formats.push({
+                  id: f.itag,
+                  ext: f.container || 'mp4',
+                  url: proxiedUrl,
+                  rawUrl: f.url,
+                  resolution: f.resolution || f.qualityLabel || (height ? `${height}p` : undefined),
+                  width: width,
+                  height: height,
+                  fps: f.fps || 30,
+                  vcodec: vcodec,
+                  acodec: acodec,
+                  filesize: f.clen ? parseInt(f.clen) : undefined
+                });
+              }
+            }
+            
+            // Fetch captions if available
+            let captions = [];
+            const enCap = videoData.captions?.find(c => c.language_code === 'en' || c.label.toLowerCase().includes('english'));
+            if (enCap && enCap.url) {
+              try {
+                const capUrl = `${baseUri}${enCap.url}`;
+                const capRes = await fetch(capUrl);
+                if (capRes.status === 200) {
+                  const capText = await capRes.text();
+                  if (capText && capText.length > 0) {
+                    captions = parseWebVttOrSrt(capText);
+                  }
+                }
+              } catch (capErr) {
+                console.error("Failed to fetch fallback captions:", capErr);
+              }
+            }
+            
+            const responseData = {
+              id: videoData.videoId,
+              title: videoData.title,
+              description: videoData.description || '',
+              duration: videoData.lengthSeconds || 0,
+              thumbnail: thumbnail,
+              channel: videoData.author || '',
+              viewCount: videoData.viewCount || 0,
+              uploadDate: videoData.publishedText || '',
+              formats: formats,
+              captions: captions
+            };
+            
             res.setHeader('Content-Type', 'application/json');
-            res.end(JSON.stringify({ error: 'Failed to fetch video info', details: err.message }));
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            res.end(JSON.stringify(responseData));
             return;
           }
           
