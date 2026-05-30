@@ -1,9 +1,26 @@
 export function getYoutubeId(url) {
   if (!url) return null;
-  // Handles standard URLs, short urls, embed urls, and mobile links
-  const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=|shorts\/)([^#\&\?]*).*/;
-  const match = url.match(regExp);
-  return (match && match[2].length === 11) ? match[2] : null;
+  const cleanUrl = url.trim();
+  
+  if (/^[a-zA-Z0-9_-]{11}$/.test(cleanUrl)) {
+    return cleanUrl;
+  }
+  
+  try {
+    const regExp = /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?|shorts|live)\/|presentation\/|watch\?.*v=|embed\/|watch\?.*\&v=)|youtu\.be\/|music\.youtube\.com\/watch\?.*v=)([a-zA-Z0-9_-]{11})/;
+    const match = cleanUrl.match(regExp);
+    if (match && match[1] && match[1].length === 11) {
+      return match[1];
+    }
+  } catch (e) {}
+  
+  const backupRegex = /(?:\/|=)([a-zA-Z0-9_-]{11})(?:[?&]|$)/;
+  const backupMatch = cleanUrl.match(backupRegex);
+  if (backupMatch && backupMatch[1] && backupMatch[1].length === 11) {
+    return backupMatch[1];
+  }
+  
+  return null;
 }
 
 export async function fetchVideoDetails(url) {
